@@ -5,7 +5,8 @@
 1. Batch size makes a big difference
 2. Network size makes a big difference (#hidden layers)
 
-Check the plot below (2 hidden layers v.s. 1 hidden layer).
+Check the plot below (2 hidden layers v.s. 1 hidden layer). 
+With 2 hidden layers VPG is able to achieve max episode length (500) with less than 400 sampled episodes.
 ![Screenshot 2024-12-04 at 23.54.55.png](plots/Screenshot%202024-12-04%20at%2023.54.55.png)
 
 3. Rewards must be normalized by mean and std (state independent baseline)
