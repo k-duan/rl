@@ -32,9 +32,9 @@ def main():
    max_episode_steps = 500
    env = gym.make("CartPole-v1", render_mode="human", max_episode_steps=max_episode_steps)
    writer = SummaryWriter()
-   policy = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
+   policy = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=1, hsize=32)
    optimizer = optim.AdamW(params=policy.parameters(), lr=0.01)
-   batch_size = 8
+   batch_size = 64
    observation, info = env.reset(seed=42)
    # only need logits and rewards to compute the loss
    batch_logits, batch_rewards, batch_episode_lens = [], [], []
@@ -80,7 +80,7 @@ def main():
          optimizer.step()
 
          # Clear this batch
-         batch_logits, batch_rewards, batch_lens = [], [], []
+         batch_logits, batch_rewards, batch_episode_lens = [], [], []
 
    writer.close()
    env.close()
