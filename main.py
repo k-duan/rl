@@ -8,29 +8,30 @@ from torch.utils.tensorboard import SummaryWriter
 
 from nets import CategoricalPolicy
 
-# rewards: BxT
-def _rewards(rewards: torch.Tensor) -> torch.Tensor:
-   return torch.sum(rewards, dim=-1).unsqueeze(dim=-1).repeat([1, rewards.size(-1)])
-
-# rewards: BxT
-def _discounted_rewards(rewards: torch.Tensor, r: float = 0.99) -> torch.Tensor:
-   d = 1.0
-   out = torch.zeros(size=rewards.size(), dtype=torch.float32)
-   for i in range(rewards.size(-1)):
-      print(f"d={d}, r={r}")
-      out[:, i] = d * rewards[:, i]
-      d *= r
-   return torch.sum(out, dim=-1).unsqueeze(dim=-1).repeat([1, out.size(-1)])
-
-# rewards: BxT
-def _rewards_to_go(rewards: torch.Tensor, r: float = 0.99) -> torch.Tensor:
-   out = torch.zeros(size=rewards.size(), dtype=torch.float32)
-   out[:, -1] = rewards[:, -1]
-   for i in range(rewards.size(-1)-1)[::-1]:
-      out[:, i] = rewards[:, i] + r * out[:, i+1]
-   return out
 
 def get_rewards_fn(reward_type: str) -> Callable:
+   # rewards: BxT
+   # pylint: disable=unused-argument
+   def _rewards(rewards: torch.Tensor, r: float = 0.99) -> torch.Tensor:
+      return torch.sum(rewards, dim=-1).unsqueeze(dim=-1).repeat([1, rewards.size(-1)])
+
+   # rewards: BxT
+   def _discounted_rewards(rewards: torch.Tensor, r: float = 0.99) -> torch.Tensor:
+      d = 1.0
+      out = torch.zeros(size=rewards.size(), dtype=torch.float32)
+      for i in range(rewards.size(-1)):
+         out[:, i] = d * rewards[:, i]
+         d *= r
+      return torch.sum(out, dim=-1).unsqueeze(dim=-1).repeat([1, out.size(-1)])
+
+   # rewards: BxT
+   def _rewards_to_go(rewards: torch.Tensor, r: float = 0.99) -> torch.Tensor:
+      out = torch.zeros(size=rewards.size(), dtype=torch.float32)
+      out[:, -1] = rewards[:, -1]
+      for i in range(rewards.size(-1) - 1)[::-1]:
+         out[:, i] = rewards[:, i] + r * out[:, i + 1]
+      return out
+
    reward_fn = {
       "vanilla": _rewards,
       "discounted": _discounted_rewards,
@@ -49,7 +50,7 @@ def main():
    max_episode_steps = 500
    env = gym.make("CartPole-v1", render_mode="human", max_episode_steps=max_episode_steps)
    writer = SummaryWriter()
-   rewards_fn = get_rewards_fn("rewards_to_go")
+   rewards_fn = get_rewards_fn("vanilla")
    policy = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
    optimizer = optim.AdamW(params=policy.parameters(), lr=0.01)
    batch_size = 8
