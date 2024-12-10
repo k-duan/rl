@@ -39,6 +39,9 @@ def get_rewards_fn(reward_type: str) -> Callable:
    }
    return reward_fn[reward_type]
 
+def _normalize_q_values(q_values: torch.Tensor) -> torch.Tensor:
+   return (q_values - q_values.mean()) / (q_values.std() + 1e-8)
+
 def _compute_loss(logits: torch.Tensor, rewards: torch.Tensor) -> torch.Tensor:
    return -torch.mean(logits * rewards)
 
@@ -46,19 +49,37 @@ def _log(train: bool, it: int, writer: SummaryWriter, batch_stats: dict):
    for k, v in batch_stats.items():
       writer.add_scalar(f'{'train' if train else 'test'}/{k}', v, it)
 
+class Batch:
+   def __init__(self):
+      self.data = {k: torch.tensor([], dtype=torch.float32) for k in self.keys()}
+
+   def keys(self):
+      return ["logits", "q_values", "episode_lengths"]
+
+   def add(self, key: str, val: torch.Tensor):
+      self.data[key] = torch.cat([self.data[key], val], dim=-1)
+
+   def size(self):
+      return self.data["episode_lengths"].size(-1)
+
+   def __getitem__(self, key):
+      return self.data[key]
+
+   def clear(self):
+      self.data = {k: torch.tensor([], dtype=torch.float32) for k in self.keys()}
+
+
 def main():
    max_episode_steps = 500
    env = gym.make("CartPole-v1", render_mode="human", max_episode_steps=max_episode_steps)
    writer = SummaryWriter()
-   rewards_fn = get_rewards_fn("vanilla")
+   rewards_fn = get_rewards_fn("rewards_to_go")
    policy = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
    optimizer = optim.AdamW(params=policy.parameters(), lr=0.01)
    batch_size = 8
    observation, info = env.reset(seed=42)
-   # only need logits and rewards to compute the loss
-   batch_logits = torch.tensor([], dtype=torch.float32)
-   batch_rewards = torch.tensor([], dtype=torch.float32)
-   batch_lens = torch.tensor([], dtype=torch.float32)
+   # Create batch
+   batch = Batch()
 
    for i in range(1000):
       logits, rewards = [], []
@@ -77,36 +98,31 @@ def main():
          if terminated or truncated:
             observation, info = env.reset()
             break
-      rewards = torch.tensor([rewards], dtype=torch.float32)
-      rewards = rewards_fn(rewards, r=0.99)
-      logits = torch.stack(logits, dim=-1)
 
       # Add episode to batch
-      batch_logits = torch.cat([batch_logits, logits], dim=-1)
-      batch_rewards = torch.cat([batch_rewards, rewards], dim=-1)
-      batch_lens = torch.cat([batch_lens, torch.tensor([[rewards.size(-1)]])], dim=-1)
+      batch.add("logits", torch.stack(logits, dim=-1))
+      batch.add("q_values", rewards_fn(torch.tensor([rewards], dtype=torch.float32), r=0.99))
+      batch.add("episode_lengths", torch.tensor([[len(rewards)]], dtype=torch.float32))
 
       # Number of episode in the batch
-      if batch_lens.size(-1) >= batch_size:
-         # Normalize batch rewards
+      if batch.size() >= batch_size:
+         # Normalize batch rewards and calculate loss
          # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
-         loss = _compute_loss(batch_logits, (batch_rewards - batch_rewards.mean()) / (batch_rewards.std() + 1e-8))
+         loss = _compute_loss(batch["logits"], _normalize_q_values(batch["q_values"]))
 
          # Log stats
          _log(train=True, it=i, writer=writer, batch_stats={
-            "batch_loss": loss.item(),
-            "batch_reward_mean": batch_rewards.mean(),
-            "batch_reward_std": batch_rewards.std(),
-            "batch_episode_length": torch.mean(batch_lens),
+            "batch_loss": loss,
+            "batch_q_mean": batch["q_values"].mean(),
+            "batch_q_std": batch["q_values"].std(),
+            "batch_episode_length": torch.mean(batch["episode_lengths"]),
          })
          optimizer.zero_grad()
          loss.backward()
          optimizer.step()
 
          # Clear this batch
-         batch_logits = torch.tensor([], dtype=torch.float32)
-         batch_rewards = torch.tensor([], dtype=torch.float32)
-         batch_lens = torch.tensor([], dtype=torch.float32)
+         batch.clear()
 
    writer.close()
    env.close()
