@@ -22,3 +22,6 @@ With 2 hidden layers VPG is able to achieve max episode length (500) with less t
  - All three methods eventually converge to max episode length. However `rewards_to_go` oscillate a little bit while  `discounted` and `vanilla` completely stays at max episode length; their training loss both converge to zero. Since the loss is a (reward) weighted sum of negative log likelihood in action space, this indicates the policy model "overfit" the episode samples and becomes "deterministic" policy (outputting 100% or 0% on left/right actions).
  - *TODO: Any other metrics to monitor?*
 6. *TODO: Using value net and advantage estimates*
+ - Fit value net with rewards to go
+ - (Bootstrap estimate)Fit value net to `r(s_t,a_t) + v^hat(s_{t+1})`
+ - N-step advantage estimates

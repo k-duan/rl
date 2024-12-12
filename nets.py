@@ -22,3 +22,16 @@ class CategoricalPolicy(nn.Module):
         action = m.sample()
         return action, m.log_prob(action)
 
+
+class ValueNet(nn.Module):
+    def __init__(self, n_observations: int, n_layers: int, hsize: int):
+        super().__init__()
+        self.input = nn.Linear(n_observations, hsize)
+        self.hidden_layers = nn.ModuleList([nn.Linear(hsize, hsize) for _ in range(n_layers)])
+        self.output = nn.Linear(hsize, 1)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        out = nn.functional.relu(self.input(obs))
+        for layer in self.hidden_layers:
+            out = nn.functional.relu(layer(out))
+        return nn.functional.relu(self.output(out))
