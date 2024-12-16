@@ -4,6 +4,7 @@ import numpy as np
 import gymnasium as gym
 import torch
 from torch import optim
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 from nets import CategoricalPolicy, ValueNet
@@ -52,8 +53,8 @@ def _normalize_v2(nt: torch.Tensor) -> torch.Tensor:
    assert nt.is_nested
    return torch.nested.nested_tensor([(t - t.mean()) / (t.std() + 1e-8) for t in nt.unbind()])
 
-def compute_policy_loss(logits: torch.Tensor, rewards: torch.Tensor) -> torch.Tensor:
-   return -torch.mean(logits * rewards)
+def compute_policy_loss(logits: torch.Tensor, rewards: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+   return -torch.mean(logits * rewards * mask)
 
 def compute_policy_loss_v2(logits: torch.Tensor, rewards: torch.Tensor) -> torch.Tensor:
    assert logits.is_nested
@@ -63,8 +64,9 @@ def compute_policy_loss_v2(logits: torch.Tensor, rewards: torch.Tensor) -> torch
    weighted_logits = logits * rewards
    return -torch.mean(torch.stack([torch.mean(wl) for wl in weighted_logits.unbind()]))
 
-def compute_value_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-   return torch.nn.functional.mse_loss(logits, target)
+def compute_value_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+   squared_errors = torch.nn.functional.mse_loss(logits, target, reduction="none")
+   return (squared_errors * mask).sum() / mask.sum()
 
 def compute_value_loss_v2(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
    assert logits.is_nested
@@ -102,58 +104,41 @@ def std_nested(nt: torch.Tensor) -> torch.Tensor:
 
 class Batch:
    """
-   Flattened batch of shape (1x(sum of T))
-   """
-   def __init__(self):
-      self.data = {k: torch.tensor([], dtype=torch.float32) for k in self.keys()}
-
-   def keys(self):
-      return ["logits", "rewards", "rewards_to_go", "episode_lengths", "observations", "next_observations"]
-
-   def add(self, key: str, val: torch.Tensor):
-      self.data[key] = torch.cat([self.data[key], val], dim=-1)
-
-   def __len__(self):
-      return self.data["episode_lengths"].size(-1)
-
-   def __getitem__(self, key):
-      return self.data[key]
-
-   def clear(self):
-      self.data = {k: torch.tensor([], dtype=torch.float32) for k in self.keys()}
-
-
-class BatchV2:
-   """
-   Allows variable dimension on T to accommodate different episodes
+   observations: BxTxN
    logits: BxT
    rewards: BxT
-   observations: BxTxN
+   episode_masks: BxT
    """
-   def __init__(self):
-      self.data = self._new()
+   def __init__(self, max_episode_len: int, n_observations: int, n_actions: int):
+      self.data = {
+         "observations": torch.zeros(size=(0, max_episode_len, n_observations), dtype=torch.float32),
+         "logits": torch.zeros(size=(0, max_episode_len), dtype=torch.float32),
+         "rewards": torch.zeros(size=(0, max_episode_len), dtype=torch.float32),
+         "rewards_to_go": torch.zeros(size=(0, max_episode_len), dtype=torch.float32),
+         "episode_masks": torch.zeros(size=(0, max_episode_len), dtype=torch.bool),
+      }
+      self._max_episode_len = max_episode_len
+      self._n_observations = n_observations
+      self._n_actions = n_actions
 
-   def _new(self) -> dict[str, torch.Tensor]:
-      return {k: torch.nested.nested_tensor([], dtype=torch.float32) for k in self.keys()}
-
-   def keys(self):
-      return ["logits", "rewards", "rewards_to_go", "episode_lengths", "observations"]
-
-   def add(self, key: str, val: torch.Tensor):
+   def add(self, kv: dict[str, torch.Tensor]):
       """
-      :param key: name of the tensor
-      :param val: new tensor without leading batch dimension
+      :param kv: dictionary of key (tensor name) and value (tensor). Each tensor's first two leading dims are 1 and T
+      :return:
       """
-      self.data[key] = torch.nested.nested_tensor(list(self.data[key].unbind()) + [val], requires_grad=val.requires_grad)
+      for k, v in kv.items():
+         assert v.size(0) == 1
+         pad_size = (0, self._max_episode_len - v.size(1))  # 1xT
+         if len(v.shape) == 3: # 1xTxN
+            pad_size = (0, 0, 0, self._max_episode_len - v.size(1))
+         v = F.pad(v, pad=pad_size)  # zero pad to max sequence length T
+         self.data[k] = torch.cat([self.data[k], v])
 
    def __len__(self):
-      return self.data["logits"].size(dim=0)
+      return self.data["logits"].size(0)
 
    def __getitem__(self, key):
       return self.data[key]
-
-   def clear(self):
-      self.data = self._new()
 
 
 def main():
@@ -168,8 +153,9 @@ def main():
    batch_size = 8
    observation, info = env.reset(seed=42)
    # Create batch
-   batch = BatchV2()
+   batch = Batch(max_episode_len=max_episode_steps, n_observations=4, n_actions=2)
 
+   value_update_iter = 0
    for i in range(1000):
       logits, rewards, observations = [], [], []
 
@@ -177,7 +163,7 @@ def main():
       while True:
          # Action
          action, log_prob = policy_net.get_action(torch.tensor(observation, dtype=torch.float32).unsqueeze(dim=0))
-         logits.append(log_prob.squeeze(dim=0))
+         logits.append(log_prob)
 
          # step (transition) through the environment with the action
          # receiving the *next* observation, reward and if the episode has terminated or truncated
@@ -190,48 +176,58 @@ def main():
             break
 
       # Add episode to batch
-      batch.add("logits", torch.stack(logits, dim=-1))
-      batch.add("rewards", torch.tensor(rewards, dtype=torch.float32))
-      batch.add("rewards_to_go", rewards_to_go_fn(torch.tensor([rewards], dtype=torch.float32), r=0.99).squeeze(dim=0))
-      batch.add("episode_lengths", torch.tensor(len(rewards), dtype=torch.float32))
-      batch.add("observations", torch.tensor(np.array(observations), dtype=torch.float32))
+      batch.add(kv={
+         "observations": torch.tensor(np.array(observations), dtype=torch.float32).unsqueeze(dim=0),
+         "logits": torch.stack(logits, dim=-1),
+         "rewards": torch.tensor(rewards, dtype=torch.float32).unsqueeze(dim=0),
+         "rewards_to_go": rewards_to_go_fn(torch.tensor([rewards], dtype=torch.float32), r=0.99),
+         "episode_masks": torch.ones((1,len(rewards)), dtype=torch.bool)
+      })
 
       # Number of episode in the batch
       if len(batch) >= batch_size:
          # Compute value estimates
          # A = r(s_t, a_t) + \lambda * v(s_t) - v(s_{t+1})
-         values = value_net(batch["observations"])
-         values = squeeze_nested(values, dim=-1)
-         current_values, next_values = slice_nested(values, 0, -1), slice_nested(values, 1, None)
-         advantages = slice_nested(batch["rewards"], 0, -1) + 0.99 * current_values - next_values
+         # (B, T, 4) -> (BxT, 4) -> (BxT, 1)
+         values = value_net(batch["observations"].view(batch_size*max_episode_steps, -1))
+
+         # Value net optimization
+         # (BxT, 1), (BxT, 1) -> (1,)
+         value_loss = compute_value_loss(
+            values,
+            batch["rewards_to_go"].view(batch_size*max_episode_steps, -1),
+            batch["episode_masks"].view(batch_size*max_episode_steps, -1))
+         value_optimizer.zero_grad()
+         value_loss.backward()
+         value_optimizer.step()
+
+         # Compute advantage estimates
+         # current_values, next_values = slice_nested(values, 0, -1), slice_nested(values, 1, None)
+         # values.view(batch_size, max_episode_steps)
+         values = values.view(batch_size, max_episode_steps)
+         advantages = batch["rewards"][:, :-1] + 0.99 * values[:, :-1] - values[: , 1:]
 
          # Policy net optimization
          # Normalize batch rewards and calculate loss
          # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
-         policy_loss = compute_policy_loss_v2(slice_nested(batch["logits"], 0, -1), _normalize_v2(advantages))
+         policy_loss = compute_policy_loss(batch["logits"][:, :-1], _normalize(advantages), batch["episode_masks"][:, :-1])
          policy_optimizer.zero_grad()
          policy_loss.backward()
          policy_optimizer.step()
-
-         # Value net optimization
-         value_loss = compute_value_loss_v2(values, batch["rewards_to_go"])
-         value_optimizer.zero_grad()
-         value_loss.backward()
-         value_optimizer.step()
 
          # Log stats
          _log(train=True, it=i, writer=writer, batch_stats={
             "policy_loss": policy_loss,
             "value_loss": value_loss,
-            "rewards/mean": mean_nested(batch["rewards"]),
-            "rewards/std": std_nested(batch["rewards"]),
-            "rewards_to_go/mean": mean_nested(batch["rewards_to_go"]),
-            "rewards_to_go/std": std_nested(batch["rewards_to_go"]),
-            "episode_length/mean": mean_nested(batch["episode_lengths"]),
+            "rewards/mean": torch.mean(batch["rewards"][batch["episode_masks"]]),
+            "rewards/std": torch.std(batch["rewards"][batch["episode_masks"]]),
+            "rewards_to_go/mean": torch.mean(batch["rewards_to_go"][batch["episode_masks"]]),
+            "rewards_to_go/std": torch.std(batch["rewards_to_go"][batch["episode_masks"]]),
+            "episode_length/mean": batch["episode_masks"].sum() / len(batch),
          })
 
          # Clear this batch
-         batch.clear()
+         batch = Batch(max_episode_len=max_episode_steps, n_observations=4, n_actions=2)
 
    writer.close()
    env.close()
