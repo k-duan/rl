@@ -53,8 +53,10 @@ def _normalize_v2(nt: torch.Tensor) -> torch.Tensor:
    assert nt.is_nested
    return torch.nested.nested_tensor([(t - t.mean()) / (t.std() + 1e-8) for t in nt.unbind()])
 
-def compute_policy_loss(logits: torch.Tensor, rewards: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-   return -torch.mean(logits * rewards * mask)
+def compute_policy_loss(logits: torch.Tensor, rewards: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+   if mask is not None:
+      return -torch.mean(logits[mask] * rewards[mask])
+   return -torch.mean(logits * rewards)
 
 def compute_policy_loss_v2(logits: torch.Tensor, rewards: torch.Tensor) -> torch.Tensor:
    assert logits.is_nested
@@ -64,9 +66,10 @@ def compute_policy_loss_v2(logits: torch.Tensor, rewards: torch.Tensor) -> torch
    weighted_logits = logits * rewards
    return -torch.mean(torch.stack([torch.mean(wl) for wl in weighted_logits.unbind()]))
 
-def compute_value_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-   squared_errors = torch.nn.functional.mse_loss(logits, target, reduction="none")
-   return (squared_errors * mask).sum() / mask.sum()
+def compute_value_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+   if mask is not None:
+      return torch.nn.functional.mse_loss(logits[mask], target[mask])
+   return torch.nn.functional.mse_loss(logits, target)
 
 def compute_value_loss_v2(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
    assert logits.is_nested
@@ -202,10 +205,8 @@ def main():
          value_optimizer.step()
 
          # Compute advantage estimates
-         # current_values, next_values = slice_nested(values, 0, -1), slice_nested(values, 1, None)
-         # values.view(batch_size, max_episode_steps)
          values = values.view(batch_size, max_episode_steps)
-         advantages = batch["rewards"][:, :-1] + 0.99 * values[:, :-1] - values[: , 1:]
+         advantages = batch["rewards"][:, :-1] + 0.99 * values[:, 1:] - values[: , :-1]
 
          # Policy net optimization
          # Normalize batch rewards and calculate loss
