@@ -10,7 +10,7 @@ With 2 hidden layers VPG is able to achieve max episode length (500) with less t
 
 ![Screenshot 2024-12-04 at 23.54.55.png](plots/Screenshot%202024-12-04%20at%2023.54.55.png)
 
-3. Rewards must be normalized by mean and std. Without doing this policy gradient methods *DO NOT*
+3. Rewards must be normalized by mean and std. Without doing this policy gradient methods *DO NOT* work.
 4. Compare different rewards functions
 
 ![Screenshot 2024-12-09 at 09.11.12.png](plots/Screenshot%202024-12-09%20at%2009.11.12.png)

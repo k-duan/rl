@@ -41,7 +41,9 @@ def get_rewards_fn(reward_type: str) -> Callable:
    return reward_fn[reward_type]
 
 @torch.no_grad()
-def _normalize(t: torch.Tensor) -> torch.Tensor:
+def _normalize(t: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+   if mask is not None:
+      return (t - t[mask].mean()) / (t[mask].std() + 1e-8)
    return (t - t.mean()) / (t.std() + 1e-8)
 
 @torch.no_grad()
@@ -189,16 +191,17 @@ def main():
 
       # Number of episode in the batch
       if len(batch) >= batch_size:
+         # import pdb; pdb.set_trace()
          # Compute value estimates
          # A = r(s_t, a_t) + \lambda * v(s_t) - v(s_{t+1})
          # (B, T, 4) -> (BxT, 4) -> (BxT, 1)
          values = value_net(batch["observations"].view(batch_size*max_episode_steps, -1))
 
-         # Value net optimization
+         # Value net optimization (normalized rewards to go)
          # (BxT, 1), (BxT, 1) -> (1,)
          value_loss = compute_value_loss(
             values,
-            batch["rewards_to_go"].view(batch_size*max_episode_steps, -1),
+            _normalize(batch["rewards_to_go"], batch["episode_masks"]).view(batch_size*max_episode_steps, -1),
             batch["episode_masks"].view(batch_size*max_episode_steps, -1))
          value_optimizer.zero_grad()
          value_loss.backward()
@@ -207,11 +210,13 @@ def main():
          # Compute advantage estimates
          values = values.view(batch_size, max_episode_steps)
          advantages = batch["rewards"][:, :-1] + 0.99 * values[:, 1:] - values[: , :-1]
+         # advantages = batch["rewards_to_go"][:, :-1]
+         # advantages = batch["rewards_to_go"][:, :-1] - values[:, :-1]
 
          # Policy net optimization
          # Normalize batch rewards and calculate loss
          # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
-         policy_loss = compute_policy_loss(batch["logits"][:, :-1], _normalize(advantages), batch["episode_masks"][:, :-1])
+         policy_loss = compute_policy_loss(batch["logits"][:, :-1], _normalize(advantages, batch["episode_masks"][:, :-1]), batch["episode_masks"][:, :-1])
          policy_optimizer.zero_grad()
          policy_loss.backward()
          policy_optimizer.step()
