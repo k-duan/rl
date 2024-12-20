@@ -29,5 +29,7 @@ With 2 hidden layers VPG is able to achieve max episode length (500) with less t
 
 The issue here is again about normalization. These rewards to go values must be normalized over the batch before fitting the value net. After the fix, it took 303 iterations to achieve max episode length (compared to 383 iterations using vanilla `rewards_to_go`)
 
+![Screenshot 2024-12-19 at 16.18.09.png](plots/Screenshot%202024-12-19%20at%2016.18.09.png)
+
 2. (Bootstrap estimate) Fit value net to `r(s_t,a_t) + 0.99*v^hat(s_{t+1})`
 3. GAE

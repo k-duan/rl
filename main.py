@@ -114,7 +114,7 @@ def main():
    # Create batch
    batch = Batch(max_episode_len=max_episode_steps, n_observations=4, n_actions=2)
 
-   for i in range(5000):
+   for i in range(1000):
       logits, rewards, observations = [], [], []
 
       # Sample one episode
