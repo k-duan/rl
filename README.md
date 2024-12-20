@@ -1,6 +1,6 @@
 # rl
 
-## Vanilla Policy Gradient Method
+## Vanilla Policy Gradient
 
 1. Batch size makes a big difference (so we can lower the variance using 3) below). Policy gradient on single episode samples *DO NOT* work.
 2. Network size makes a big difference (#hidden layers)
@@ -21,10 +21,13 @@ With 2 hidden layers VPG is able to achieve max episode length (500) with less t
  - `rewards_to_go` looks better by showing a decreasing loss trend (compared with `vanilla` and `discounted_rewards` methods). However batch losses are still quite noisy for all three methods.
  - All three methods eventually converge to max episode length. However `rewards_to_go` oscillate a little bit while  `discounted` and `vanilla` completely stays at max episode length; their training loss both converge to zero. Since the loss is a (reward) weighted sum of negative log likelihood in action space, this indicates the policy model "overfit" the episode samples and becomes "deterministic" policy (outputting 100% or 0% on left/right actions).
  - *TODO: Any other metrics to monitor?*
-6. *TODO: Using value net and advantage estimates*
- - Fit value net with rewards to go. In the initial attempt, we refactored the code and represent each trajactory using a fixed size sequence length (set to max sequence steps) but paired with a sequence mask. This allows a simpler tensor representation. The value net quickly converges, however there seems to be an overfitting issue. See plot below:
+
+## Actor-Critic
+1. Fit value net with rewards to go. In the initial attempt, we refactored the code and represent each trajactory using a fixed size sequence length (set to max sequence steps) but paired with a sequence mask. This allows a simpler tensor representation. The value net quickly converges, however there seems to be an overfitting issue. See plot below:
 
 ![Screenshot 2024-12-16 at 15.33.21.png](plots/Screenshot%202024-12-16%20at%2015.33.21.png)
 
- - (Bootstrap estimate) Fit value net to `r(s_t,a_t) + v^hat(s_{t+1})`
- - N-step advantage estimates
+The issue here is again about normalization. These rewards to go values must be normalized over the batch before fitting the value net. After the fix, it took 303 iterations to achieve max episode length (compared to 383 iterations using vanilla `rewards_to_go`)
+
+2. (Bootstrap estimate) Fit value net to `r(s_t,a_t) + 0.99*v^hat(s_{t+1})`
+3. GAE

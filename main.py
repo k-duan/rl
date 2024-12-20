@@ -46,65 +46,19 @@ def _normalize(t: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
       return (t - t[mask].mean()) / (t[mask].std() + 1e-8)
    return (t - t.mean()) / (t.std() + 1e-8)
 
-@torch.no_grad()
-def _normalize_v2(nt: torch.Tensor) -> torch.Tensor:
-   """
-   nt: a nested tensor with leading dim as batch dim
-   Normalize along batch dim
-   """
-   assert nt.is_nested
-   return torch.nested.nested_tensor([(t - t.mean()) / (t.std() + 1e-8) for t in nt.unbind()])
-
 def compute_policy_loss(logits: torch.Tensor, rewards: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
    if mask is not None:
       return -torch.mean(logits[mask] * rewards[mask])
    return -torch.mean(logits * rewards)
-
-def compute_policy_loss_v2(logits: torch.Tensor, rewards: torch.Tensor) -> torch.Tensor:
-   assert logits.is_nested
-   assert rewards.is_nested
-   assert logits.size(0) == rewards.size(0)
-
-   weighted_logits = logits * rewards
-   return -torch.mean(torch.stack([torch.mean(wl) for wl in weighted_logits.unbind()]))
 
 def compute_value_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
    if mask is not None:
       return torch.nn.functional.mse_loss(logits[mask], target[mask])
    return torch.nn.functional.mse_loss(logits, target)
 
-def compute_value_loss_v2(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-   assert logits.is_nested
-   assert target.is_nested
-   assert logits.size(0) == target.size(0)
-
-   return torch.mean(torch.stack([torch.nn.functional.mse_loss(l, t) for l, t in zip(logits.unbind(), target.unbind())]))
-
 def _log(train: bool, it: int, writer: SummaryWriter, batch_stats: dict):
    for k, v in batch_stats.items():
       writer.add_scalar(f'{'train' if train else 'test'}/{k}', v, it)
-
-def slice_nested(nt: torch.Tensor, start: int, end: Optional[int]) -> torch.Tensor:
-   """
-   :param nt: a nested tensor
-   :param start: start dim of each tensor in t
-   :param end: end dim of each tensor in t
-   :return: a new nested tensor with sliced dim
-   """
-   assert nt.is_nested
-   return torch.nested.nested_tensor([t[start:end] for t in nt.unbind()], requires_grad=nt.requires_grad)
-
-def squeeze_nested(nt: torch.Tensor, dim: int) -> torch.Tensor:
-   assert nt.is_nested
-   return torch.nested.nested_tensor([t.squeeze(dim=dim) for t in nt.unbind()], requires_grad=nt.requires_grad)
-
-def mean_nested(nt: torch.Tensor) -> torch.Tensor:
-   assert nt.is_nested
-   return torch.mean(torch.cat([t if t.size() else t.unsqueeze(dim=0) for t in nt.unbind()]))
-
-def std_nested(nt: torch.Tensor) -> torch.Tensor:
-   assert nt.is_nested
-   return torch.std(torch.cat([t if t.size() else t.unsqueeze(dim=0) for t in nt.unbind()]))
 
 
 class Batch:
@@ -160,8 +114,7 @@ def main():
    # Create batch
    batch = Batch(max_episode_len=max_episode_steps, n_observations=4, n_actions=2)
 
-   value_update_iter = 0
-   for i in range(1000):
+   for i in range(5000):
       logits, rewards, observations = [], [], []
 
       # Sample one episode
@@ -191,32 +144,57 @@ def main():
 
       # Number of episode in the batch
       if len(batch) >= batch_size:
+         # Normalized rewards to go
+         nrtg = _normalize(batch["rewards_to_go"], batch["episode_masks"])
+
          # import pdb; pdb.set_trace()
          # Compute value estimates
          # A = r(s_t, a_t) + \lambda * v(s_t) - v(s_{t+1})
          # (B, T, 4) -> (BxT, 4) -> (BxT, 1)
          values = value_net(batch["observations"].view(batch_size*max_episode_steps, -1))
+         values = values.view(batch_size, max_episode_steps) # TODO optimize this
 
          # Value net optimization (normalized rewards to go)
          # (BxT, 1), (BxT, 1) -> (1,)
-         value_loss = compute_value_loss(
-            values,
-            _normalize(batch["rewards_to_go"], batch["episode_masks"]).view(batch_size*max_episode_steps, -1),
-            batch["episode_masks"].view(batch_size*max_episode_steps, -1))
+         # Choices of the target:
+         # 1. Rewards to go (normalized)
+         targets = nrtg
+
+         # 2. Bootstrap estimate
+         # targets = torch.zeros_like(values, dtype=torch.float32)
+         # with torch.no_grad():
+         #    targets[:, :-1] = batch["rewards"][:, :-1] + 0.99 * values[:, 1:]
+         #    targets[:, -1] = batch["rewards"][:, -1]
+
+         # Compute value loss
+         value_loss = compute_value_loss(values, targets, batch["episode_masks"])
          value_optimizer.zero_grad()
          value_loss.backward()
          value_optimizer.step()
 
          # Compute advantage estimates
-         values = values.view(batch_size, max_episode_steps)
-         advantages = batch["rewards"][:, :-1] + 0.99 * values[:, 1:] - values[: , :-1]
-         # advantages = batch["rewards_to_go"][:, :-1]
-         # advantages = batch["rewards_to_go"][:, :-1] - values[:, :-1]
+         advantages = torch.zeros_like(batch["logits"], dtype=torch.float32)
+         with torch.no_grad():
+            # Estimated "rewards to go":
+            # Reward of current start, plus discounted value of future state:
+            #  i.e. batch["rewards"][:, :-1] + 0.99 * values[:, 1:]
+            # Baseline:
+            # Value of current state:
+            #  i.e. values[: , :-1]
+            # 1. Advantage estimate of first T-1 states:
+            # advantages[:, :-1] = batch["rewards"][:, :-1] + 0.99 * values[:, 1:] - values[: , :-1]
+            # 2. Advantage estimate of the last state
+            # advantages[:, -1] = batch["rewards"][:, -1] - values[:, -1] # edge case
+            # TODO the issue here is that value function target is normalized while batch rewards above are not.
+            #  What does this end up with?
+            advantages[:, :-1] = nrtg[:, :-1] - values[:, :-1]
+            advantages[:, -1] = nrtg[:, -1]
 
          # Policy net optimization
          # Normalize batch rewards and calculate loss
          # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
-         policy_loss = compute_policy_loss(batch["logits"][:, :-1], _normalize(advantages, batch["episode_masks"][:, :-1]), batch["episode_masks"][:, :-1])
+         policy_loss = compute_policy_loss(batch["logits"], _normalize(advantages, batch["episode_masks"]),
+                                           batch["episode_masks"])
          policy_optimizer.zero_grad()
          policy_loss.backward()
          policy_optimizer.step()
