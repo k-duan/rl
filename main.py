@@ -41,10 +41,11 @@ def get_rewards_fn(reward_type: str) -> Callable:
    return reward_fn[reward_type]
 
 @torch.no_grad()
-def _normalize(t: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+def _normalize(t: torch.Tensor, mask: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+   mean, std = t.mean(), t.std()
    if mask is not None:
-      return (t - t[mask].mean()) / (t[mask].std() + 1e-8)
-   return (t - t.mean()) / (t.std() + 1e-8)
+      mean, std = t[mask].mean(), t[mask].std()
+   return (t - mean) / (std + 1e-8), mean, std
 
 def compute_policy_loss(logits: torch.Tensor, rewards: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
    if mask is not None:
@@ -145,11 +146,9 @@ def main():
       # Number of episode in the batch
       if len(batch) >= batch_size:
          # Normalized rewards to go
-         nrtg = _normalize(batch["rewards_to_go"], batch["episode_masks"])
+         nrtg, _, _ = _normalize(batch["rewards_to_go"], batch["episode_masks"])
 
-         # import pdb; pdb.set_trace()
          # Compute value estimates
-         # A = r(s_t, a_t) + \lambda * v(s_t) - v(s_{t+1})
          # (B, T, 4) -> (BxT, 4) -> (BxT, 1)
          values = value_net(batch["observations"].view(batch_size*max_episode_steps, -1))
          values = values.view(batch_size, max_episode_steps) # TODO optimize this
@@ -157,7 +156,7 @@ def main():
          # Value net optimization (normalized rewards to go)
          # (BxT, 1), (BxT, 1) -> (1,)
          # Choices of the target:
-         # 1. Rewards to go (normalized)
+         # 1. Rewards to go
          targets = nrtg
 
          # 2. Bootstrap estimate
@@ -175,26 +174,17 @@ def main():
          # Compute advantage estimates
          advantages = torch.zeros_like(batch["logits"], dtype=torch.float32)
          with torch.no_grad():
-            # Estimated "rewards to go":
-            # Reward of current start, plus discounted value of future state:
-            #  i.e. batch["rewards"][:, :-1] + 0.99 * values[:, 1:]
-            # Baseline:
-            # Value of current state:
-            #  i.e. values[: , :-1]
-            # 1. Advantage estimate of first T-1 states:
+            # This works much better (A = \sum_{t'=t}^{T}r(s_t) - v(s_{t+1}))
+            advantages = nrtg - values
+            # This does not work well (A = r(s_t, a_t) + \lambda * v(s_{t+1}) - v(s_t))
             # advantages[:, :-1] = batch["rewards"][:, :-1] + 0.99 * values[:, 1:] - values[: , :-1]
-            # 2. Advantage estimate of the last state
             # advantages[:, -1] = batch["rewards"][:, -1] - values[:, -1] # edge case
-            # TODO the issue here is that value function target is normalized while batch rewards above are not.
-            #  What does this end up with?
-            advantages[:, :-1] = nrtg[:, :-1] - values[:, :-1]
-            advantages[:, -1] = nrtg[:, -1]
 
          # Policy net optimization
          # Normalize batch rewards and calculate loss
          # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
-         policy_loss = compute_policy_loss(batch["logits"], _normalize(advantages, batch["episode_masks"]),
-                                           batch["episode_masks"])
+         natv, _, _ = _normalize(advantages, batch["episode_masks"])
+         policy_loss = compute_policy_loss(batch["logits"], natv, batch["episode_masks"])
          policy_optimizer.zero_grad()
          policy_loss.backward()
          policy_optimizer.step()
