@@ -174,9 +174,15 @@ def main():
          # Compute advantage estimates
          advantages = torch.zeros_like(batch["logits"], dtype=torch.float32)
          with torch.no_grad():
-            # This works much better (A = \sum_{t'=t}^{T}r(s_t) - v(s_{t+1}))
+            # 1. This works much better (A = \sum_{t'=t}^{T}r(s_t) - v(s_{t+1}))
             advantages = nrtg - values
-            # This does not work well (A = r(s_t, a_t) + \lambda * v(s_{t+1}) - v(s_t))
+            # 2. This does not work well (A = r(s_t, a_t) + \lambda * v(s_{t+1}) - v(s_t))
+            # Reason (?): target of value net must be normalized to make the training stable. this means value net is
+            #        fit to normalized rewards to go. But in the formula, we subtract `\lambda * v(s_{t+1}) - v(s_t))`
+            #        from un-normalized raw reward. So they do not really match. We tried to use the mean/std of the
+            #        normalized rewards to go to either a) normalize raw state reward, or b) scale values back. However
+            #        neither work well. They can both achieve ~40 episode length but very far from what first approach
+            #        could achieve. In first approach, everything is calculated in the same normalized space.
             # advantages[:, :-1] = batch["rewards"][:, :-1] + 0.99 * values[:, 1:] - values[: , :-1]
             # advantages[:, -1] = batch["rewards"][:, -1] - values[:, -1] # edge case
 
