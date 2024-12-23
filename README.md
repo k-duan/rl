@@ -23,16 +23,8 @@ With 2 hidden layers VPG is able to achieve max episode length (500) with less t
  - *TODO: Any other metrics to monitor?*
 
 ## Actor-Critic
-1. Fit value net with rewards to go. In the initial attempt, we refactored the code and represent each trajactory using a fixed size sequence length (set to max sequence steps) but paired with a sequence mask. This allows a simpler tensor representation. The value net quickly converges, however there seems to be an overfitting issue. See plot below:
-
-![Screenshot 2024-12-16 at 15.33.21.png](plots/Screenshot%202024-12-16%20at%2015.33.21.png)
-
-The issue here is again about normalization. These rewards to go values must be normalized over the batch before fitting the value net. After the fix, it took 303 iterations to achieve max episode length (compared to 383 iterations using vanilla `rewards_to_go`)
-
-
-
-2. Using TD errors:
- - a) TD error w/o MC returns + (batch mean/std) normalized `rewards_to_go` as value target + (batch mean/std) normalized `advantages`: never reached max episode length (can at most reach ~40 steps). *Reason: Bias-Variance tradeoff?*
+1. Using TD errors:
+ - a) TD error w/o MC returns + (batch mean/std) normalized `rewards_to_go` as value target + (batch mean/std) normalized `advantages`: never reached max episode length (can at most reach ~40 steps by normalizing raw rewards using mean/std of `rewards_to_go`; otherwise ). *Reason: Bias-Variance tradeoff?*
  - b) TD error with MC returns + (batch mean/std) normalized `rewards_to_go` as value target + (batch mean/std) normalized `advantages`: took 303 iterations to reach max episode length.
 
 ![Screenshot 2024-12-19 at 16.18.09.png](plots/Screenshot%202024-12-19%20at%2016.18.09.png)
@@ -42,5 +34,5 @@ The issue here is again about normalization. These rewards to go values must be 
 ![Screenshot 2024-12-23 at 11.45.22.png](plots/Screenshot%202024-12-23%20at%2011.45.22.png)
 
  - In both b) and c), value loss does not converge well. *Reason: batch size too small? Need more training iterations?*
-3. *TODO (Bootstrap estimate) Fit value net to `r(s_t,a_t) + 0.99*v^hat(s_{t+1})`*.
-4. GAE
+2. *TODO (Bootstrap estimate) Fit value net to `r(s_t,a_t) + 0.99*v^hat(s_{t+1})`*. 
+3. GAE
