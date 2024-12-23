@@ -11,6 +11,7 @@ from nets import CategoricalPolicy, ValueNet
 
 
 def get_rewards_fn(reward_type: str) -> Callable:
+
    # rewards: BxT
    # pylint: disable=unused-argument
    def _rewards(rewards: torch.Tensor, r: float = 0.99) -> torch.Tensor:
@@ -40,12 +41,42 @@ def get_rewards_fn(reward_type: str) -> Callable:
    }
    return reward_fn[reward_type]
 
+def get_advantage_fn(advantage_type: str) -> Callable:
+
+   @torch.no_grad()
+   def _rewards_to_go(batch: Batch, _) -> torch.Tensor:
+      return batch["rewards_to_go"]
+
+   @torch.no_grad()
+   def _monte_carlo_td_error(batch: Batch, values: torch.Tensor) -> torch.Tensor:
+      return batch["rewards_to_go"] - values
+
+   @torch.no_grad()
+   def _td_error(batch: Batch, values: torch.Tensor) -> torch.Tensor:
+      td_errors = torch.zeros_like(batch["rewards"], dtype=torch.float32)
+      td_errors[:, :-1] = batch["rewards"][:, :-1] + 0.99 * values[:, 1:] - values[: , :-1]
+      td_errors[:, -1] = batch["rewards"][:, -1] - values[:, -1] # edge case
+      return td_errors
+
+   @torch.no_grad()
+   def _gae(batch: Batch, values: torch.Tensor) -> torch.Tensor:
+      pass
+
+   advantage_fn = {
+      "rewards_to_go": _rewards_to_go,
+      "monte_carlo_td_error": _monte_carlo_td_error,
+      "td_error": _td_error,
+      "gae": _gae,
+   }
+
+   return advantage_fn[advantage_type]
+
 @torch.no_grad()
-def _normalize(t: torch.Tensor, mask: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _normalize(t: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
    mean, std = t.mean(), t.std()
    if mask is not None:
       mean, std = t[mask].mean(), t[mask].std()
-   return (t - mean) / (std + 1e-8), mean, std
+   return (t - mean) / (std + 1e-8)
 
 def compute_policy_loss(logits: torch.Tensor, rewards: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
    if mask is not None:
@@ -100,12 +131,16 @@ class Batch:
    def __getitem__(self, key):
       return self.data[key]
 
+   def __setitem__(self, key, value):
+      self.data[key] = value
+
 
 def main():
    max_episode_steps = 500
    env = gym.make("CartPole-v1", render_mode="human", max_episode_steps=max_episode_steps)
    writer = SummaryWriter()
    rewards_to_go_fn = get_rewards_fn("rewards_to_go")
+   advantage_fn = get_advantage_fn("monte_carlo_td_error")
    policy_net = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
    policy_optimizer = optim.AdamW(params=policy_net.parameters(), lr=0.01)
    value_net = ValueNet(n_observations=4, n_layers=2, hsize=32)
@@ -146,7 +181,7 @@ def main():
       # Number of episode in the batch
       if len(batch) >= batch_size:
          # Normalized rewards to go
-         nrtg, _, _ = _normalize(batch["rewards_to_go"], batch["episode_masks"])
+         # batch["nrtg"] = _normalize(batch["rewards_to_go"], batch["episode_masks"])
 
          # Compute value estimates
          # (B, T, 4) -> (BxT, 4) -> (BxT, 1)
@@ -155,15 +190,7 @@ def main():
 
          # Value net optimization (normalized rewards to go)
          # (BxT, 1), (BxT, 1) -> (1,)
-         # Choices of the target:
-         # 1. Rewards to go
-         targets = nrtg
-
-         # 2. Bootstrap estimate
-         # targets = torch.zeros_like(values, dtype=torch.float32)
-         # with torch.no_grad():
-         #    targets[:, :-1] = batch["rewards"][:, :-1] + 0.99 * values[:, 1:]
-         #    targets[:, -1] = batch["rewards"][:, -1]
+         targets = batch["rewards_to_go"]
 
          # Compute value loss
          value_loss = compute_value_loss(values, targets, batch["episode_masks"])
@@ -172,25 +199,12 @@ def main():
          value_optimizer.step()
 
          # Compute advantage estimates
-         advantages = torch.zeros_like(batch["logits"], dtype=torch.float32)
-         with torch.no_grad():
-            # 1. This works much better (A = \sum_{t'=t}^{T}r(s_t) - v(s_{t+1}))
-            advantages = nrtg - values
-            # 2. This does not work well (A = r(s_t, a_t) + \lambda * v(s_{t+1}) - v(s_t))
-            # Reason (?): target of value net must be normalized to make the training stable. this means value net is
-            #        fit to normalized rewards to go. But in the formula, we subtract `\lambda * v(s_{t+1}) - v(s_t))`
-            #        from un-normalized raw reward. So they do not really match. We tried to use the mean/std of the
-            #        normalized rewards to go to either a) normalize raw state reward, or b) scale values back. However
-            #        neither work well. They can both achieve ~40 episode length but very far from what first approach
-            #        could achieve. In first approach, everything is calculated in the same normalized space.
-            # advantages[:, :-1] = batch["rewards"][:, :-1] + 0.99 * values[:, 1:] - values[: , :-1]
-            # advantages[:, -1] = batch["rewards"][:, -1] - values[:, -1] # edge case
+         advantages = advantage_fn(batch, values)
 
          # Policy net optimization
          # Normalize batch rewards and calculate loss
          # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
-         natv, _, _ = _normalize(advantages, batch["episode_masks"])
-         policy_loss = compute_policy_loss(batch["logits"], natv, batch["episode_masks"])
+         policy_loss = compute_policy_loss(batch["logits"], _normalize(advantages, batch["episode_masks"]), batch["episode_masks"])
          policy_optimizer.zero_grad()
          policy_loss.backward()
          policy_optimizer.step()
