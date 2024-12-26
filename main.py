@@ -44,23 +44,33 @@ def get_rewards_fn(reward_type: str) -> Callable:
 def get_advantage_fn(advantage_type: str) -> Callable:
 
    @torch.no_grad()
-   def _rewards_to_go(batch: Batch, _) -> torch.Tensor:
+   def _rewards_to_go(batch: Batch, **kwargs) -> torch.Tensor:
       return batch["rewards_to_go"]
 
    @torch.no_grad()
-   def _monte_carlo_td_error(batch: Batch, values: torch.Tensor) -> torch.Tensor:
+   def _monte_carlo_td_error(batch: Batch, values: torch.Tensor, **kwargs) -> torch.Tensor:
       return batch["rewards_to_go"] - values
 
    @torch.no_grad()
-   def _td_error(batch: Batch, values: torch.Tensor) -> torch.Tensor:
+   def _td_error(batch: Batch, values: torch.Tensor, r: float = 0.99, **kwargs) -> torch.Tensor:
       td_errors = torch.zeros_like(batch["rewards"], dtype=torch.float32)
-      td_errors[:, :-1] = batch["rewards"][:, :-1] + 0.99 * values[:, 1:] - values[: , :-1]
+      td_errors[:, :-1] = batch["rewards"][:, :-1] + r * values[:, 1:] - values[: , :-1]
       td_errors[:, -1] = batch["rewards"][:, -1] - values[:, -1] # edge case
       return td_errors
 
    @torch.no_grad()
-   def _gae(batch: Batch, values: torch.Tensor) -> torch.Tensor:
-      pass
+   def _gae(batch: Batch, values: torch.Tensor, r: float = 0.99, l: float = 1.0) -> torch.Tensor:
+      # GAE can be calculated recursively:
+      # GAE(s_t, a_t) = td_error(t) + r * l * GAE(s_{t+1}, a_{t+1})
+      # where GAE(s_T, a_T) = td_error(T)
+      # GAE(l=1.0) -> `_monte_carlo_td_error`
+      # GAE(l=0) -> `_td_error`
+      td_errors = _td_error(batch, values)
+      gae = torch.zeros_like(td_errors, dtype=torch.float32)
+      gae[:, -1] = td_errors[:, -1]
+      for i in range(gae.size(-1) - 1)[::-1]:
+         gae[:, i] = td_errors[:, i] + r * l * gae[:, i + 1]
+      return gae
 
    advantage_fn = {
       "rewards_to_go": _rewards_to_go,
@@ -140,7 +150,7 @@ def main():
    env = gym.make("CartPole-v1", render_mode="human", max_episode_steps=max_episode_steps)
    writer = SummaryWriter()
    rewards_to_go_fn = get_rewards_fn("rewards_to_go")
-   advantage_fn = get_advantage_fn("monte_carlo_td_error")
+   advantage_fn = get_advantage_fn("gae")
    policy_net = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
    policy_optimizer = optim.AdamW(params=policy_net.parameters(), lr=0.01)
    value_net = ValueNet(n_observations=4, n_layers=2, hsize=32)
@@ -199,7 +209,7 @@ def main():
          value_optimizer.step()
 
          # Compute advantage estimates
-         advantages = advantage_fn(batch, values)
+         advantages = advantage_fn(batch, values, r=0.99, l=0.99)
 
          # Policy net optimization
          # Normalize batch rewards and calculate loss
