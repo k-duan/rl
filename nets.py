@@ -16,16 +16,16 @@ class CategoricalPolicy(nn.Module):
             out = nn.functional.relu(layer(out))
         return nn.functional.relu(self.output(out))
 
-    def get_action(self, observation: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = self.forward(observation)
+    def get_action(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = self.forward(obs)
         m = Categorical(logits=logits)
-        action = m.sample()
-        return action, m.log_prob(action)
+        acts = m.sample()
+        return acts, m.log_prob(acts)
 
-    def get_lob_probs(self, observation: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        logits = self.forward(observation)
+    def get_lob_probs(self, obs: torch.Tensor, acts: torch.Tensor) -> torch.Tensor:
+        logits = self.forward(obs)
         m = Categorical(logits=logits)
-        return m.log_prob(action)
+        return m.log_prob(acts)
 
 
 class ValueNet(nn.Module):

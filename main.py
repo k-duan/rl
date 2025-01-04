@@ -128,14 +128,13 @@ class Batch:
    def __init__(self, max_episode_len: int, n_observations: int, n_actions: int):
       self.data = {
          "observations": torch.zeros(size=(0, max_episode_len, n_observations), dtype=torch.float32),
+         "actions": torch.zeros(size=(0, max_episode_len), dtype=torch.float32),
          "logits": torch.zeros(size=(0, max_episode_len), dtype=torch.float32),
          "rewards": torch.zeros(size=(0, max_episode_len), dtype=torch.float32),
          "rewards_to_go": torch.zeros(size=(0, max_episode_len), dtype=torch.float32),
          "episode_masks": torch.zeros(size=(0, max_episode_len), dtype=torch.bool),
       }
       self._max_episode_len = max_episode_len
-      self._n_observations = n_observations
-      self._n_actions = n_actions
 
    def add(self, kv: dict[str, torch.Tensor]):
       """
@@ -229,15 +228,15 @@ def main():
             value_optimizer.step()
 
          # Compute advantage estimates
-         advantages = advantage_fn(batch, values, r=0.99, l=0.99)
+         advantages = advantage_fn(batch, values, r=0.99, l=0.95)
 
          # Policy net optimization
          for _ in range(policy_update_steps):
             # Normalize batch rewards and calculate loss
             # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
-            _, log_probs = policy_net.get_lob_probs(batch["observations"].view(batch_size*max_episode_steps, -1),
-                                                    batch["actions"].view(batch_size*max_episode_steps, -1))
-            policy_loss = policy_loss_fn(logits=log_probs,
+            log_probs = policy_net.get_lob_probs(batch["observations"].view(batch_size*max_episode_steps, -1),
+                                                    batch["actions"].view(-1))
+            policy_loss = policy_loss_fn(logits=log_probs.view(batch_size, max_episode_steps),
                                          advantages=_normalize(advantages, batch["episode_masks"]),
                                          mask=batch["episode_masks"],
                                          old_logits=batch["logits"].detach(),
