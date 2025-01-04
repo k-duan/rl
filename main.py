@@ -88,10 +88,25 @@ def _normalize(t: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
       mean, std = t[mask].mean(), t[mask].std()
    return (t - mean) / (std + 1e-8)
 
-def compute_policy_loss(logits: torch.Tensor, rewards: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-   if mask is not None:
-      return -torch.mean(logits[mask] * rewards[mask])
-   return -torch.mean(logits * rewards)
+def get_policy_loss_fn(loss_type: str) -> Callable:
+   def vpg_loss(logits: torch.Tensor, advantages: torch.Tensor, mask: torch.Tensor = None, **kwargs):
+      if mask is None:
+         mask = torch.ones_like(logits, dtype=torch.bool)
+      return -torch.mean(logits[mask] * advantages[mask])
+   def ppo_loss(logits: torch.Tensor, advantages: torch.Tensor, mask: torch.Tensor = None, old_logits: torch.Tensor = None, clip_ratio: float = 0.2):
+      if mask is None:
+         mask = torch.ones_like(logits, dtype=torch.bool)
+      # Importance sampling probability ratio rho = \pi(a|s) / \pi_old(a|s)
+      rho = torch.exp(logits - old_logits)
+      # min(rho*advantages, clip(rho, 1-clip_ratio, 1+clip_ratio)*advantages)
+      return torch.mean(torch.min(rho[mask] * advantages[mask], torch.clamp(rho[mask], 1-clip_ratio, 1+clip_ratio) * advantages[mask]))
+
+   policy_loss_fn = {
+      "vpg": vpg_loss,
+      "ppo": ppo_loss,
+   }
+
+   return policy_loss_fn[loss_type]
 
 def compute_value_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
    if mask is not None:
@@ -151,22 +166,26 @@ def main():
    writer = SummaryWriter()
    rewards_to_go_fn = get_rewards_fn("rewards_to_go")
    advantage_fn = get_advantage_fn("gae")
+   policy_loss_fn = get_policy_loss_fn("vpg")
    policy_net = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
    policy_optimizer = optim.AdamW(params=policy_net.parameters(), lr=0.01)
+   policy_update_steps = 1
    value_net = ValueNet(n_observations=4, n_layers=2, hsize=32)
    value_optimizer = optim.AdamW(params=value_net.parameters(), lr=0.01)
+   value_update_steps = 1
    batch_size = 8
    observation, info = env.reset(seed=42)
    # Create batch
    batch = Batch(max_episode_len=max_episode_steps, n_observations=4, n_actions=2)
 
    for i in range(1000):
-      logits, rewards, observations = [], [], []
+      actions, logits, rewards, observations = [], [], [], []
 
       # Sample one episode
       while True:
          # Action
          action, log_prob = policy_net.get_action(torch.tensor(observation, dtype=torch.float32).unsqueeze(dim=0))
+         actions.append(action)
          logits.append(log_prob)
 
          # step (transition) through the environment with the action
@@ -182,6 +201,7 @@ def main():
       # Add episode to batch
       batch.add(kv={
          "observations": torch.tensor(np.array(observations), dtype=torch.float32).unsqueeze(dim=0),
+         "actions": torch.stack(actions, dim=-1),
          "logits": torch.stack(logits, dim=-1),
          "rewards": torch.tensor(rewards, dtype=torch.float32).unsqueeze(dim=0),
          "rewards_to_go": rewards_to_go_fn(torch.tensor([rewards], dtype=torch.float32), r=0.99),
@@ -193,31 +213,38 @@ def main():
          # Normalized rewards to go
          # batch["nrtg"] = _normalize(batch["rewards_to_go"], batch["episode_masks"])
 
-         # Compute value estimates
-         # (B, T, 4) -> (BxT, 4) -> (BxT, 1)
-         values = value_net(batch["observations"].view(batch_size*max_episode_steps, -1))
-         values = values.view(batch_size, max_episode_steps) # TODO optimize this
+         # Value net optimization
+         for _ in range(value_update_steps):
+            # Compute value estimates
+            # (B, T, 4) -> (BxT, 4) -> (BxT, 1)
+            values = value_net(batch["observations"].view(batch_size*max_episode_steps, -1))
+            values = values.view(batch_size, max_episode_steps) # TODO optimize this
 
-         # Value net optimization (normalized rewards to go)
-         # (BxT, 1), (BxT, 1) -> (1,)
-         targets = batch["rewards_to_go"]
-
-         # Compute value loss
-         value_loss = compute_value_loss(values, targets, batch["episode_masks"])
-         value_optimizer.zero_grad()
-         value_loss.backward()
-         value_optimizer.step()
+            # regression target: normalized rewards to go
+            # (BxT, 1), (BxT, 1) -> (1,)
+            targets = batch["rewards_to_go"]
+            value_loss = compute_value_loss(values, targets, batch["episode_masks"])
+            value_optimizer.zero_grad()
+            value_loss.backward()
+            value_optimizer.step()
 
          # Compute advantage estimates
          advantages = advantage_fn(batch, values, r=0.99, l=0.99)
 
          # Policy net optimization
-         # Normalize batch rewards and calculate loss
-         # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
-         policy_loss = compute_policy_loss(batch["logits"], _normalize(advantages, batch["episode_masks"]), batch["episode_masks"])
-         policy_optimizer.zero_grad()
-         policy_loss.backward()
-         policy_optimizer.step()
+         for _ in range(policy_update_steps):
+            # Normalize batch rewards and calculate loss
+            # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
+            _, log_probs = policy_net.get_lob_probs(batch["observations"].view(batch_size*max_episode_steps, -1),
+                                                    batch["actions"].view(batch_size*max_episode_steps, -1))
+            policy_loss = policy_loss_fn(logits=log_probs,
+                                         advantages=_normalize(advantages, batch["episode_masks"]),
+                                         mask=batch["episode_masks"],
+                                         old_logits=batch["logits"].detach(),
+                                         clip_ratio=0.2)
+            policy_optimizer.zero_grad()
+            policy_loss.backward()
+            policy_optimizer.step()
 
          # Log stats
          _log(train=True, it=i, writer=writer, batch_stats={
@@ -232,6 +259,7 @@ def main():
 
          # Clear this batch
          batch = Batch(max_episode_len=max_episode_steps, n_observations=4, n_actions=2)
+
 
    writer.close()
    env.close()

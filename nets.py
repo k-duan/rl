@@ -22,6 +22,11 @@ class CategoricalPolicy(nn.Module):
         action = m.sample()
         return action, m.log_prob(action)
 
+    def get_lob_probs(self, observation: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        logits = self.forward(observation)
+        m = Categorical(logits=logits)
+        return m.log_prob(action)
+
 
 class ValueNet(nn.Module):
     def __init__(self, n_observations: int, n_layers: int, hsize: int):
