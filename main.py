@@ -225,10 +225,15 @@ def main():
             # (B, T, 4) -> (BxT, 4) -> (BxT, 1)
             values = value_net(batch["observations"].view(batch_size*max_episode_steps, -1))
             values = values.view(batch_size, max_episode_steps) # TODO optimize this
+            # Handle mask and last state value
+            mask = batch["episode_masks"].clone()
+            mask[:, :-1] = mask[:, 1:]
+            mask[:, -1] = 0
+            values = torch.where(mask, values, 0)
 
             # regression target: normalized rewards to go
             # (BxT, 1), (BxT, 1) -> (1,)
-            targets = _normalize(batch["rewards_to_go"], batch["episode_masks"])
+            targets = batch["rewards_to_go"]  # _normalize(batch["rewards_to_go"], batch["episode_masks"])
             value_loss = compute_value_loss(values, targets, batch["episode_masks"])
             running_value_loss += value_loss.item()
             value_optimizer.zero_grad()
@@ -261,15 +266,18 @@ def main():
 
          # Log stats
          _log(train=True, it=i, writer=writer, batch_stats={
-            "running_policy_loss": running_policy_loss / policy_epochs,
-            "current_policy_lr": policy_scheduler.get_last_lr()[0],
-            "running_value_loss": running_value_loss / value_epochs,
-            "current_value_lr": value_scheduler.get_last_lr()[0],
+            "policy/running_loss": running_policy_loss / policy_epochs,
+            "policy/lr": policy_scheduler.get_last_lr()[0],
+            "value/running_loss": running_value_loss / value_epochs,
+            "value/lr": value_scheduler.get_last_lr()[0],
+            "values/max": torch.max(values[batch["episode_masks"]]),
+            "values/mean": torch.mean(values[batch["episode_masks"]]),
+            "values/std": torch.std(values[batch["episode_masks"]]),
+            "rewards/total": torch.mean(torch.sum(batch["rewards"], dim=-1)),
             "rewards/mean": torch.mean(batch["rewards"][batch["episode_masks"]]),
             "rewards/std": torch.std(batch["rewards"][batch["episode_masks"]]),
-            "rewards_to_go/mean": torch.mean(batch["rewards_to_go"][batch["episode_masks"]]),
-            "rewards_to_go/std": torch.std(batch["rewards_to_go"][batch["episode_masks"]]),
-            "episode_length/mean": batch["episode_masks"].sum() / len(batch),
+            "rewards/to_go/mean": torch.mean(batch["rewards_to_go"][batch["episode_masks"]]),
+            "rewards/to_go/std": torch.std(batch["rewards_to_go"][batch["episode_masks"]]),
          })
 
          # Clear this batch
