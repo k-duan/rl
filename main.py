@@ -89,21 +89,21 @@ def _normalize(t: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
    return (t - mean) / (std + 1e-8)
 
 def get_policy_loss_fn(loss_type: str) -> Callable:
-   def vpg_loss(logits: torch.Tensor, advantages: torch.Tensor, mask: torch.Tensor = None, **kwargs):
+   def _vpg_loss(logits: torch.Tensor, advantages: torch.Tensor, mask: torch.Tensor = None, **kwargs):
       if mask is None:
          mask = torch.ones_like(logits, dtype=torch.bool)
       return -torch.mean(logits[mask] * advantages[mask])
-   def ppo_loss(logits: torch.Tensor, advantages: torch.Tensor, mask: torch.Tensor = None, old_logits: torch.Tensor = None, clip_ratio: float = 0.2):
+   def _ppo_loss(logits: torch.Tensor, advantages: torch.Tensor, mask: torch.Tensor = None, old_logits: torch.Tensor = None, clip_ratio: float = 0.2):
       if mask is None:
          mask = torch.ones_like(logits, dtype=torch.bool)
       # Importance sampling probability ratio rho = \pi(a|s) / \pi_old(a|s)
       rho = torch.exp(logits - old_logits)
       # min(rho*advantages, clip(rho, 1-clip_ratio, 1+clip_ratio)*advantages)
-      return torch.mean(torch.min(rho[mask] * advantages[mask], torch.clamp(rho[mask], 1-clip_ratio, 1+clip_ratio) * advantages[mask]))
+      return -torch.mean(torch.min(rho[mask] * advantages[mask], torch.clamp(rho[mask], 1-clip_ratio, 1+clip_ratio) * advantages[mask]))
 
    policy_loss_fn = {
-      "vpg": vpg_loss,
-      "ppo": ppo_loss,
+      "vpg": _vpg_loss,
+      "ppo": _ppo_loss,
    }
 
    return policy_loss_fn[loss_type]
@@ -167,17 +167,21 @@ def main():
    advantage_fn = get_advantage_fn("gae")
    policy_loss_fn = get_policy_loss_fn("vpg")
    policy_net = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
-   policy_optimizer = optim.AdamW(params=policy_net.parameters(), lr=0.01)
-   policy_update_steps = 1
+   policy_optimizer = optim.AdamW(params=policy_net.parameters(), lr=1e-3)
+   policy_grad_clip = 1.0
+   policy_epochs = 8
    value_net = ValueNet(n_observations=4, n_layers=2, hsize=32)
-   value_optimizer = optim.AdamW(params=value_net.parameters(), lr=0.01)
-   value_update_steps = 1
-   batch_size = 8
+   value_optimizer = optim.AdamW(params=value_net.parameters(), lr=1e-3)
+   value_grad_clip = 1.0
+   value_epochs = 8
+   batch_size = 32
+   r = 0.99
+   l = 0.95
    observation, info = env.reset(seed=42)
    # Create batch
    batch = Batch(max_episode_len=max_episode_steps, n_observations=4, n_actions=2)
 
-   for i in range(1000):
+   for i in range(5000):
       actions, logits, rewards, observations = [], [], [], []
 
       # Sample one episode
@@ -213,7 +217,9 @@ def main():
          # batch["nrtg"] = _normalize(batch["rewards_to_go"], batch["episode_masks"])
 
          # Value net optimization
-         for _ in range(value_update_steps):
+         values = None
+         running_value_loss = 0
+         for _ in range(value_epochs):
             # Compute value estimates
             # (B, T, 4) -> (BxT, 4) -> (BxT, 1)
             values = value_net(batch["observations"].view(batch_size*max_episode_steps, -1))
@@ -223,15 +229,18 @@ def main():
             # (BxT, 1), (BxT, 1) -> (1,)
             targets = batch["rewards_to_go"]
             value_loss = compute_value_loss(values, targets, batch["episode_masks"])
+            running_value_loss += value_loss.item()
             value_optimizer.zero_grad()
             value_loss.backward()
+            torch.nn.utils.clip_grad_norm_(value_net.parameters(), max_norm=value_grad_clip)
             value_optimizer.step()
 
          # Compute advantage estimates
-         advantages = advantage_fn(batch, values, r=0.99, l=0.95)
+         advantages = advantage_fn(batch, values, r=r, l=l)
 
          # Policy net optimization
-         for _ in range(policy_update_steps):
+         running_policy_loss = 0
+         for _ in range(policy_epochs):
             # Normalize batch rewards and calculate loss
             # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
             log_probs = policy_net.get_lob_probs(batch["observations"].view(batch_size*max_episode_steps, -1),
@@ -241,14 +250,16 @@ def main():
                                          mask=batch["episode_masks"],
                                          old_logits=batch["logits"].detach(),
                                          clip_ratio=0.2)
+            running_policy_loss += policy_loss.item()
             policy_optimizer.zero_grad()
             policy_loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=policy_grad_clip)
             policy_optimizer.step()
 
          # Log stats
          _log(train=True, it=i, writer=writer, batch_stats={
-            "policy_loss": policy_loss,
-            "value_loss": value_loss,
+            "running_policy_loss": running_policy_loss / policy_epochs,
+            "running_value_loss": running_value_loss / value_epochs,
             "rewards/mean": torch.mean(batch["rewards"][batch["episode_masks"]]),
             "rewards/std": torch.std(batch["rewards"][batch["episode_masks"]]),
             "rewards_to_go/mean": torch.mean(batch["rewards_to_go"][batch["episode_masks"]]),
