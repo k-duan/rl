@@ -165,13 +165,17 @@ def main():
    writer = SummaryWriter()
    rewards_to_go_fn = get_rewards_fn("rewards_to_go")
    advantage_fn = get_advantage_fn("gae")
+   # policy net parameters
    policy_loss_fn = get_policy_loss_fn("vpg")
    policy_net = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
-   policy_optimizer = optim.AdamW(params=policy_net.parameters(), lr=1e-3)
+   policy_optimizer = optim.AdamW(params=policy_net.parameters(), lr=1e-2)
+   policy_scheduler = optim.lr_scheduler.ExponentialLR(policy_optimizer, gamma=0.99)
    policy_grad_clip = 1.0
    policy_epochs = 8
+   # value net parameters
    value_net = ValueNet(n_observations=4, n_layers=2, hsize=32)
-   value_optimizer = optim.AdamW(params=value_net.parameters(), lr=1e-3)
+   value_optimizer = optim.AdamW(params=value_net.parameters(), lr=1e-2)
+   value_scheduler = optim.lr_scheduler.ExponentialLR(value_optimizer, gamma=0.99)
    value_grad_clip = 1.0
    value_epochs = 8
    batch_size = 32
@@ -208,14 +212,11 @@ def main():
          "logits": torch.stack(logits, dim=-1),
          "rewards": torch.tensor(rewards, dtype=torch.float32).unsqueeze(dim=0),
          "rewards_to_go": rewards_to_go_fn(torch.tensor([rewards], dtype=torch.float32), r=0.99),
-         "episode_masks": torch.ones((1,len(rewards)), dtype=torch.bool)
+         "episode_masks": torch.ones((1, len(rewards)), dtype=torch.bool)
       })
 
       # Number of episode in the batch
       if len(batch) >= batch_size:
-         # Normalized rewards to go
-         # batch["nrtg"] = _normalize(batch["rewards_to_go"], batch["episode_masks"])
-
          # Value net optimization
          values = None
          running_value_loss = 0
@@ -227,13 +228,14 @@ def main():
 
             # regression target: normalized rewards to go
             # (BxT, 1), (BxT, 1) -> (1,)
-            targets = batch["rewards_to_go"]
+            targets = _normalize(batch["rewards_to_go"], batch["episode_masks"])
             value_loss = compute_value_loss(values, targets, batch["episode_masks"])
             running_value_loss += value_loss.item()
             value_optimizer.zero_grad()
             value_loss.backward()
             torch.nn.utils.clip_grad_norm_(value_net.parameters(), max_norm=value_grad_clip)
             value_optimizer.step()
+            value_scheduler.step()
 
          # Compute advantage estimates
          advantages = advantage_fn(batch, values, r=r, l=l)
@@ -255,11 +257,14 @@ def main():
             policy_loss.backward()
             torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=policy_grad_clip)
             policy_optimizer.step()
+            policy_scheduler.step()
 
          # Log stats
          _log(train=True, it=i, writer=writer, batch_stats={
             "running_policy_loss": running_policy_loss / policy_epochs,
+            "current_policy_lr": policy_scheduler.get_last_lr()[0],
             "running_value_loss": running_value_loss / value_epochs,
+            "current_value_lr": value_scheduler.get_last_lr()[0],
             "rewards/mean": torch.mean(batch["rewards"][batch["episode_masks"]]),
             "rewards/std": torch.std(batch["rewards"][batch["episode_masks"]]),
             "rewards_to_go/mean": torch.mean(batch["rewards_to_go"][batch["episode_masks"]]),
