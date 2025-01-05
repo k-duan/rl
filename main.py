@@ -170,13 +170,13 @@ def main():
    policy_net = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
    policy_optimizer = optim.AdamW(params=policy_net.parameters(), lr=1e-2)
    policy_scheduler = optim.lr_scheduler.ExponentialLR(policy_optimizer, gamma=0.99)
-   policy_grad_clip = 1.0
-   policy_epochs = 8
+   policy_grad_clip = 0.5
+   policy_epochs = 4
    # value net parameters
    value_net = ValueNet(n_observations=4, n_layers=2, hsize=32)
    value_optimizer = optim.AdamW(params=value_net.parameters(), lr=1e-2)
    value_scheduler = optim.lr_scheduler.ExponentialLR(value_optimizer, gamma=0.99)
-   value_grad_clip = 1.0
+   value_grad_clip = 0.5
    value_epochs = 8
    batch_size = 32
    r = 0.99
