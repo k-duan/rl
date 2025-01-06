@@ -180,7 +180,7 @@ def main():
    rewards_to_go_fn = get_rewards_fn("rewards_to_go")
    advantage_fn = get_advantage_fn("gae")
    # policy net parameters
-   policy_loss_fn = get_policy_loss_fn("vpg")
+   policy_loss_fn = get_policy_loss_fn("ppo")
    policy_net = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
    policy_optimizer = optim.AdamW(params=policy_net.parameters(), lr=1e-2)
    policy_scheduler = optim.lr_scheduler.ExponentialLR(policy_optimizer, gamma=0.99)
@@ -253,7 +253,7 @@ def main():
             running_value_loss += value_loss.item()
             value_optimizer.zero_grad()
             value_loss.backward()
-            torch.nn.utils.clip_grad_norm_(value_net.parameters(), max_norm=value_grad_clip)
+            torch.nn.utils.clip_grad_norm_(parameters=value_net.parameters(), max_norm=value_grad_clip)
             running_value_grad_norm += grad_norm(value_net.parameters())
             value_optimizer.step()
             value_scheduler.step()
@@ -267,13 +267,15 @@ def main():
          for _ in range(policy_epochs):
             # Normalize batch rewards and calculate loss
             # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
-            log_probs = policy_net.get_lob_probs(batch["observations"].view(batch_size*max_episode_steps, -1),
-                                                    batch["actions"].view(-1))
-            policy_loss = policy_loss_fn(logits=log_probs.view(batch_size, max_episode_steps),
-                                         advantages=_normalize(advantages, batch["episode_masks"]),
-                                         mask=batch["episode_masks"],
-                                         old_logits=batch["logits"].detach(),
-                                         clip_ratio=0.2)
+            log_probs = policy_net.get_lob_probs(
+               obs=batch["observations"].view(batch_size*max_episode_steps, -1),
+               acts=batch["actions"].view(-1))
+            policy_loss = policy_loss_fn(
+               logits=log_probs.view(batch_size, max_episode_steps),
+               advantages=_normalize(advantages, batch["episode_masks"]),
+               mask=batch["episode_masks"],
+               old_logits=batch["logits"].detach(),
+               clip_ratio=0.2)
             running_policy_loss += policy_loss.item()
             policy_optimizer.zero_grad()
             policy_loss.backward()
