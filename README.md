@@ -1,5 +1,7 @@
 # rl
 
+<img src="plots/cartpolev1.gif" height="250"/>
+
 ## Vanilla Policy Gradient
 
 1. Batch size makes a big difference (so we can lower the variance using 3) below). Policy gradient on single episode samples *DO NOT* work.
