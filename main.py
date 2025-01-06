@@ -1,4 +1,6 @@
-from typing import Callable, Optional
+import os
+from datetime import datetime
+from typing import Callable, Iterator
 
 import numpy as np
 import gymnasium as gym
@@ -110,12 +112,20 @@ def get_policy_loss_fn(loss_type: str) -> Callable:
 
 def compute_value_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
    if mask is not None:
-      return torch.nn.functional.mse_loss(logits[mask], target[mask])
-   return torch.nn.functional.mse_loss(logits, target)
+      return torch.nn.functional.huber_loss(logits[mask], target[mask])
+   return torch.nn.functional.huber_loss(logits, target)
 
 def _log(train: bool, it: int, writer: SummaryWriter, batch_stats: dict):
    for k, v in batch_stats.items():
       writer.add_scalar(f'{'train' if train else 'test'}/{k}', v, it)
+
+def grad_norm(parameters: Iterator[torch.nn.Parameter]) -> float:
+   total_norm = 0.0
+   for p in parameters:
+      if p.grad is not None:
+         param_norm = p.grad.data.norm(2)
+         total_norm += param_norm.item() ** 2
+   return total_norm ** 0.5
 
 
 class Batch:
@@ -160,9 +170,13 @@ class Batch:
 
 
 def main():
+   env_name = "CartPole-v1"
    max_episode_steps = 500
-   env = gym.make("CartPole-v1", render_mode="human", max_episode_steps=max_episode_steps)
-   writer = SummaryWriter()
+   env = gym.make(env_name, render_mode="human", max_episode_steps=max_episode_steps)
+   exp_name = os.getenv("EXP_NAME", None)
+   dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+   log_name = f"{env_name.lower()}-{exp_name}-{dt}" if exp_name is not None else f"{env_name.lower()}-{dt}"
+   writer = SummaryWriter(log_dir=f"runs/{log_name}")
    rewards_to_go_fn = get_rewards_fn("rewards_to_go")
    advantage_fn = get_advantage_fn("gae")
    # policy net parameters
@@ -220,6 +234,7 @@ def main():
          # Value net optimization
          values = None
          running_value_loss = 0
+         running_value_grad_norm = 0
          for _ in range(value_epochs):
             # Compute value estimates
             # (B, T, 4) -> (BxT, 4) -> (BxT, 1)
@@ -239,6 +254,7 @@ def main():
             value_optimizer.zero_grad()
             value_loss.backward()
             torch.nn.utils.clip_grad_norm_(value_net.parameters(), max_norm=value_grad_clip)
+            running_value_grad_norm += grad_norm(value_net.parameters())
             value_optimizer.step()
             value_scheduler.step()
 
@@ -247,6 +263,7 @@ def main():
 
          # Policy net optimization
          running_policy_loss = 0
+         running_policy_grad_norm = 0
          for _ in range(policy_epochs):
             # Normalize batch rewards and calculate loss
             # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
@@ -261,14 +278,17 @@ def main():
             policy_optimizer.zero_grad()
             policy_loss.backward()
             torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=policy_grad_clip)
+            running_policy_grad_norm += grad_norm(policy_net.parameters())
             policy_optimizer.step()
             policy_scheduler.step()
 
          # Log stats
          _log(train=True, it=i, writer=writer, batch_stats={
             "policy/running_loss": running_policy_loss / policy_epochs,
+            "policy/running_grad_norm": running_policy_grad_norm / policy_epochs,
             "policy/lr": policy_scheduler.get_last_lr()[0],
             "value/running_loss": running_value_loss / value_epochs,
+            "value/running_grad_norm": running_value_grad_norm / value_epochs,
             "value/lr": value_scheduler.get_last_lr()[0],
             "values/max": torch.max(values[batch["episode_masks"]]),
             "values/mean": torch.mean(values[batch["episode_masks"]]),
