@@ -111,9 +111,9 @@ def get_policy_loss_fn(loss_type: str) -> Callable:
    return policy_loss_fn[loss_type]
 
 def compute_value_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-   if mask is not None:
-      return torch.nn.functional.huber_loss(logits[mask], target[mask])
-   return torch.nn.functional.huber_loss(logits, target)
+   if mask is None:
+      mask = torch.ones_like(logits, dtype=torch.bool)
+   return torch.nn.functional.huber_loss(logits[mask], target[mask])
 
 def _log(train: bool, it: int, writer: SummaryWriter, batch_stats: dict):
    for k, v in batch_stats.items():
@@ -127,6 +127,12 @@ def grad_norm(parameters: Iterator[torch.nn.Parameter]) -> float:
          total_norm += param_norm.item() ** 2
    return total_norm ** 0.5
 
+# Reference: http://joschu.net/blog/kl-approx.html
+def approx_kl(logits_p: torch.Tensor, logits_q: torch.Tensor, mask: torch.Tensor = None) -> float:
+   assert logits_p.size() == logits_q.size()
+   if mask is None:
+      mask = torch.ones_like(logits_p, dtype=torch.bool)
+   return 0.5 * torch.mean(logits_p[mask] - logits_q[mask]).item() ** 2
 
 class Batch:
    """
@@ -184,13 +190,13 @@ def main():
    policy_net = CategoricalPolicy(n_observations=4, n_actions=2, n_layers=2, hsize=32)
    policy_optimizer = optim.AdamW(params=policy_net.parameters(), lr=1e-2)
    policy_scheduler = optim.lr_scheduler.ExponentialLR(policy_optimizer, gamma=0.99)
-   policy_grad_clip = 0.5
+   policy_grad_clip = 0.2
    policy_epochs = 4
    # value net parameters
    value_net = ValueNet(n_observations=4, n_layers=2, hsize=32)
    value_optimizer = optim.AdamW(params=value_net.parameters(), lr=1e-2)
    value_scheduler = optim.lr_scheduler.ExponentialLR(value_optimizer, gamma=0.99)
-   value_grad_clip = 0.5
+   value_grad_clip = 0.2
    value_epochs = 8
    batch_size = 32
    r = 0.99
@@ -264,6 +270,7 @@ def main():
          # Policy net optimization
          running_policy_loss = 0
          running_policy_grad_norm = 0
+         running_policy_kl = 0
          for _ in range(policy_epochs):
             # Normalize batch rewards and calculate loss
             # https://datascience.stackexchange.com/questions/20098/why-do-we-normalize-the-discounted-rewards-when-doing-policy-gradient-reinforcem
@@ -277,6 +284,10 @@ def main():
                old_logits=batch["logits"].detach(),
                clip_ratio=0.2)
             running_policy_loss += policy_loss.item()
+            running_policy_kl += approx_kl(
+               logits_p=log_probs.view(batch_size, max_episode_steps),
+               logits_q=batch["logits"].detach(),
+               mask=batch["episode_masks"])
             policy_optimizer.zero_grad()
             policy_loss.backward()
             torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=policy_grad_clip)
@@ -288,13 +299,14 @@ def main():
          _log(train=True, it=i, writer=writer, batch_stats={
             "policy/running_loss": running_policy_loss / policy_epochs,
             "policy/running_grad_norm": running_policy_grad_norm / policy_epochs,
+            "policy/running_kl": running_policy_kl / policy_epochs,
             "policy/lr": policy_scheduler.get_last_lr()[0],
             "value/running_loss": running_value_loss / value_epochs,
             "value/running_grad_norm": running_value_grad_norm / value_epochs,
             "value/lr": value_scheduler.get_last_lr()[0],
-            "values/max": torch.max(values[batch["episode_masks"]]),
-            "values/mean": torch.mean(values[batch["episode_masks"]]),
-            "values/std": torch.std(values[batch["episode_masks"]]),
+            "value/max": torch.max(values[batch["episode_masks"]]),
+            "value/mean": torch.mean(values[batch["episode_masks"]]),
+            "value/std": torch.std(values[batch["episode_masks"]]),
             "rewards/total": torch.mean(torch.sum(batch["rewards"], dim=-1)),
             "rewards/mean": torch.mean(batch["rewards"][batch["episode_masks"]]),
             "rewards/std": torch.std(batch["rewards"][batch["episode_masks"]]),
