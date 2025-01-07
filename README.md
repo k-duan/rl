@@ -2,13 +2,20 @@
 
 <img src="plots/cartpolev1.gif" height="250"/>
 
+This repo is for learning RL basics. I intend to keep things simple, for example:
+
+* Focus on simple gym environment
+* Minimum dependencies and avoid advanced implementations in pytorch
+* Only use implementation tricks that are necessary to make things work
+* Tensorization as much as possible, e.g. episode masks to handle variable sequence length
+
 ## Implementations
 
 * REINFORCE
 * A2C
 * PPO
 
-Notes:
+## Notes
 
 * A2C suffers from instability issues. A few helpful tricks:
   * advantage normalization
@@ -19,3 +26,8 @@ Notes:
 ):
 
 <img src="plots/Screenshot%202025-01-07%20at%2010.37.27.png" height="250"/>
+
+* There are other approaches (not implemented in this repo), e.g. A3C, SAC to make actor critic method more stable.
+* Reinforcement Learning materials:
+  * [Sergey Levine's CS285 open course](https://rail.eecs.berkeley.edu/deeprlcourse/)
+  * [OpenAI RL Spinning Up](https://spinningup.openai.com/en/latest/index.html)
